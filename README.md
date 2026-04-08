@@ -36,43 +36,48 @@ Chrome currently launches **headed** so you can watch what's happening. Flip
 
 ## Install
 
-```pwsh
-cd F:/Dan/Documents/Repos/teams-browser-mcp
-npm install
-```
+> **Hand this section to your AI assistant** (Claude Code, Cursor, Cline,
+> Windsurf, etc.). It contains everything an agent needs to clone, install,
+> and register the MCP — you don't need to follow it manually.
 
-`npm install` pulls the Playwright Node package and the MCP SDK. No build
-step — there's nothing to compile.
+**Prompt for your AI assistant:**
 
-If you don't already have Google Chrome installed, run:
-
-```pwsh
-npx playwright install chrome
-```
-
-We launch Chrome with `channel: 'chrome'`, which prefers the real Chrome on
-your machine — this is deliberate: the bundled Chromium doesn't play as nicely
-with Teams' bot detection.
-
-## Register with Claude Code
-
-```pwsh
-claude mcp remove teams
-claude mcp add teams --scope user node F:/Dan/Documents/Repos/teams-browser-mcp/src/index.js
-```
-
-For Claude Desktop, the equivalent JSON:
-
-```json
-{
-  "mcpServers": {
-    "teams": {
-      "command": "node",
-      "args": ["F:\\Dan\\Documents\\Repos\\teams-browser-mcp\\src\\index.js"]
-    }
-  }
-}
-```
+> Install the Teams Browser MCP from `https://github.com/DanPatten/Teams-Browser-MCP`
+> and register it with my MCP client.
+>
+> Steps you should perform:
+>
+> 1. Clone the repo to a sensible local path (ask me where if unsure).
+> 2. Run `npm install` in the cloned directory. Requires Node 20+.
+> 3. Ensure Google Chrome is available. If not, run `npx playwright install chrome`.
+>    The MCP launches Chrome with `channel: 'chrome'` on purpose — bundled
+>    Chromium triggers Teams' bot detection.
+> 4. Register the MCP with whichever MCP client I use. The server entry point
+>    is `node <repo-path>/src/index.js`. It speaks stdio. Examples:
+>    - **Claude Code:** `claude mcp add teams --scope user node <repo-path>/src/index.js`
+>    - **Claude Desktop / generic JSON config:**
+>      ```json
+>      {
+>        "mcpServers": {
+>          "teams": {
+>            "command": "node",
+>            "args": ["<repo-path>/src/index.js"]
+>          }
+>        }
+>      }
+>      ```
+>    - For other clients (Cursor, Cline, Windsurf, etc.), use their standard
+>      MCP config format with the same `command` + `args`.
+> 5. After registering, restart / reconnect the MCP client so it picks up the
+>    new server.
+> 6. Tell me to call the `authenticate` tool once. The first call will open a
+>    Chrome window — I sign in to Teams inside that window, the session is
+>    persisted to `%LOCALAPPDATA%\TeamsBrowserMcp\state.json`, and future
+>    calls reuse it.
+> 7. **Important:** before you (the AI) start using this MCP for real work,
+>    call the `teams_guide` tool once and read the returned guide. It tells
+>    you how to drive Teams via the primitive tools. Do not assume selectors
+>    — always probe with `teams_query` first.
 
 ## Verifying the running MCP is on your latest edits
 
