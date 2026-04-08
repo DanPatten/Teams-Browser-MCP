@@ -1,38 +1,49 @@
 # Teams Browser MCP
 
-A Node.js MCP server that lets an LLM drive Microsoft Teams through a real,
-user-authenticated Chrome session. Playwright owns the entire auth lifecycle:
-on first use it opens a Chrome window, you sign in directly inside it, and the
-resulting session (`storageState`) is persisted so future process starts skip
-the sign-in entirely. If Teams ever kicks you back to the login page, the
-Playwright window pops to the front and polls until you're signed in again.
+An MCP server that gives your AI assistant access to Microsoft Teams. No
+Microsoft Graph API. No webhooks. No tenant admin. No app registration. You
+sign in once in a normal Chrome window and it just works.
 
-No tray app, no second process, no build step, no cookie scraping — the MCP
-server is plain JavaScript running on Node, and owns the auth lifecycle itself.
+## Why this exists
 
-**Design philosophy:** Teams' DOM drifts constantly across releases, so this
-MCP intentionally **does not ship hardcoded scrapers** for "search",
-"list channels", etc. Instead it exposes a small set of selector-based
-primitives — `teams_query`, `teams_click`, `teams_type`, `teams_navigate`,
-`teams_wait_for`, `teams_press_key`, `teams_evaluate` — and ships a navigation
-guide (`TEAMS_GUIDE.md`, also exposed via the `teams_guide` tool) that the
-calling LLM reads to drive Teams the same way a human would.
+Every other "Teams integration" path forces you to either beg your IT
+department for Graph API permissions, register an Azure app, configure
+webhooks, or hand a third party your credentials. For most people that's a
+dead end — and even when it isn't, you've now widened your attack surface
+with a long-lived API token sitting in some config file.
 
-## Layout
+This MCP takes a different route: it talks to Teams the same way you do, in
+a real browser, signed in as you. There is no separate identity, no extra
+permissions to grant, and no token to leak. Your AI sees exactly what you
+see in Teams — nothing more — and the session lives entirely in a sandboxed
+Chrome profile on your own machine. If you can open Teams in a browser, this
+works. If your admin revokes your account, this stops working. That's the
+whole security model, and it's the same one you already trust.
 
-| Path | Purpose |
-|---|---|
-| `src/index.js` | MCP server bootstrap + tool registration (stdio transport). |
-| `src/logger.js` | Tee logger — every line goes to stderr AND `%LOCALAPPDATA%\TeamsBrowserMcp\logs\mcp.log`. |
-| `src/teamsSession.js` | Gated Playwright lifecycle; owns the full auth flow (cold start, warm start, mid-session expiry). URL allowlist restricts the browser to Microsoft-owned hosts. |
-| `src/authState.js` | Thin wrapper around `state.json` (exists / delete); Playwright does the actual read/write. |
-| `src/tools/authenticate.js` | The `authenticate` tool. |
-| `src/tools/primitives.js` | The 7 primitive browser tools. |
-| `src/tools/teamsGuide.js` | Returns `TEAMS_GUIDE.md` to calling LLMs. |
-| `TEAMS_GUIDE.md` | Navigation guide: how to drive Teams with the primitives, useful starting selectors, common workflows. |
+## How it works
 
-Chrome currently launches **headed** so you can watch what's happening. Flip
-`headless: true` in `src/teamsSession.js` when you're ready to background it.
+When the MCP starts, it launches a dedicated Chrome window via Playwright
+and points it at `teams.microsoft.com`. The first time you use it, you sign
+in inside that window — normally, with SSO and MFA and whatever else your
+organization requires. Playwright captures the resulting browser session
+(cookies, local storage, the works) and saves it to a file under
+`%LOCALAPPDATA%\TeamsBrowserMcp\` so the next launch picks up where you
+left off. If Teams ever expires your session, the same window pops back to
+the front and waits for you to sign in again.
+
+That window is locked down: a network-level allowlist blocks every host
+that isn't part of the Microsoft / Teams ecosystem, so the browser can't be
+hijacked into a general-purpose web agent and third-party trackers can't
+load.
+
+Once you're signed in, the MCP exposes a small set of primitive tools —
+query the DOM, click an element, type into a field, wait for something to
+appear, navigate within Teams. Your AI uses these the way a human would:
+look at the page, find the thing it wants, click it. There are deliberately
+**no** hardcoded "search Teams" or "list channels" tools, because Teams'
+DOM changes constantly and baked-in scrapers rot within weeks. The repo
+ships a `TEAMS_GUIDE.md` (also returned by the `teams_guide` tool) that
+teaches the calling AI how to navigate Teams with the primitives.
 
 ## Install
 
@@ -79,58 +90,6 @@ Chrome currently launches **headed** so you can watch what's happening. Flip
 >    you how to drive Teams via the primitive tools. Do not assume selectors
 >    — always probe with `teams_query` first.
 
-## Verifying the running MCP is on your latest edits
-
-There is no compiled binary. On every `/mcp` reconnect, Claude Code respawns
-`node src/index.js`, which reads the source files fresh — so "did my edit
-land?" has a trivial answer: yes, as long as you reconnected. The server
-prints a **boot** line on start that includes the entry file mtime; tail the
-log to confirm:
-
-```pwsh
-Get-Content -Wait "$env:LOCALAPPDATA\TeamsBrowserMcp\logs\mcp.log"
-```
-
-You'll see lines like:
-
-```
-[2026-04-08T02:02:31.771Z] [info] [server] boot pid=22976 node=v24.11.0 ... entryMtime=2026-04-08T02:00:44.559Z version=0.2.0
-```
-
-## First use
-
-The MCP handshake is instant — Playwright doesn't launch until a tool needs
-it. On first use:
-
-1. Call `authenticate` (or any other tool). The server launches a Playwright
-   Chrome window and navigates to Teams.
-2. **If `state.json` already has a valid session** (warm start), Teams loads
-   straight into the app shell and the tool returns within seconds.
-3. **Otherwise** (cold start, or expired tokens), the Playwright window is
-   brought to the front on the Teams sign-in page and a banner is printed to
-   stderr telling you to sign in *inside that window*. Polling runs every 2s;
-   within ~2s of the logged-in DOM markers appearing, Playwright saves the
-   refreshed `storageState` to disk and your tool call completes.
-
-If Teams ever bounces you back to the login page mid-session (tokens
-expired, signed out elsewhere), the next tool call will pop the same
-Playwright window to the front and run the sign-in loop again — no tear-down,
-no second window.
-
-You can also call `authenticate` explicitly to delete `state.json` and force
-a fresh sign-in (for example, to switch accounts).
-
-### Aborting a sign-in
-
-If you want to bail out of the sign-in poll loop without waiting for the 5
-minute timeout, create this sentinel file:
-
-```pwsh
-New-Item "$env:LOCALAPPDATA\TeamsBrowserMcp\abort-auth"
-```
-
-Within ~2s the in-flight tool call will throw and the file is cleaned up.
-
 ## Tools
 
 - `authenticate` — delete saved state and re-run the interactive sign-in flow.
@@ -145,13 +104,6 @@ Within ~2s the in-flight tool call will throw and the file is cleaned up.
 - `teams_press_key` — keyboard input (`Enter`, `Escape`, `Control+K`, etc.).
 - `teams_wait_for` — wait for a selector to reach a state.
 - `teams_evaluate` — escape hatch: run a JS expression in the page.
-
-## Re-authenticating
-
-To force a fresh login (tokens expired, or you signed out elsewhere), either
-delete `%LOCALAPPDATA%\TeamsBrowserMcp\state.json` or call the `authenticate`
-tool. It tears down the existing Playwright context, deletes state.json, and
-restarts the auth flow from scratch.
 
 ## Logging
 
