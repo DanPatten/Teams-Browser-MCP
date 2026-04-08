@@ -105,11 +105,3 @@ teaches the calling AI how to navigate Teams with the primitives.
 - `teams_wait_for` — wait for a selector to reach a state.
 - `teams_evaluate` — escape hatch: run a JS expression in the page.
 
-## Logging
-
-Every non-trivial operation is wrapped in a `log.span(...)` call that emits
-enter + exit + elapsed-ms lines. A hang is impossible to lose: an entered
-span without a matching exit points you straight at the culprit. Log lines
-go to both stderr (so Claude Code's `/mcp logs` sees them) and the file
-above. Every Playwright call, every DOM `evaluate`, every cookie-profile
-scan, every auth poll tick is logged.
