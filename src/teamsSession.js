@@ -26,7 +26,20 @@ const LOGIN_FORM_SELECTORS = [
 ];
 
 // Budget for the quick "are we still authed?" check on every getPage().
-const QUICK_AUTH_CHECK_MS = 500;
+// Generous because a false negative here triggers a full headed re-sign-in,
+// while a false positive just causes the calling tool to fail with a clear
+// selector error. Bias toward declaring authed.
+const QUICK_AUTH_CHECK_MS = 3000;
+
+// One-time warm-up after a fresh page is established. The auth markers
+// (LOGGED_IN_SELECTORS) appear early in Teams' boot — before the search
+// box, chat list, etc. are usable. We wait for one of these "actually
+// ready" markers before handing the page to the first tool, then never
+// wait again for the lifetime of the session.
+const UI_READY_SELECTORS = [
+  "[data-tid='AUTOSUGGEST_INPUT']", // Global search box in the persistent header.
+];
+const UI_READY_TIMEOUT_MS = 15_000;
 
 // Budget for the initial "logged in vs login page" decision after the
 // very first navigate.
@@ -106,6 +119,7 @@ class TeamsSession {
     this._browser = null;
     this._context = null;
     this._page = null;
+    this._headed = false;
     this._lock = Promise.resolve();
   }
 
@@ -137,6 +151,7 @@ class TeamsSession {
     this._context = null;
     this._page = null;
     this._browser = null;
+    this._headed = false;
   }
 
   async _ensureSession() {
@@ -144,48 +159,91 @@ class TeamsSession {
     if (this._browser && this._page && !this._page.isClosed()) {
       const authed = await this._isAuthed(QUICK_AUTH_CHECK_MS);
       if (authed) {
-        log.info('session', 'reuse-existing-page', { authed: true });
+        log.info('session', 'reuse-existing-page', { authed: true, headed: this._headed });
         await this._persistStorageState();
         return this._page;
       }
-      log.warn('session', 'existing-page-not-authed; entering sign-in loop');
-      await this._runSignInLoop();
-      await this._persistStorageState();
+      log.warn('session', 'existing-page-not-authed; switching to headed sign-in', { headed: this._headed });
+      await this._doInteractiveSignIn();
       return this._page;
     }
 
     // Cold start path: no browser yet.
-    await this._launchBrowser();
+    if (AuthState.exists()) {
+      // Try the happy path: launch headless and replay cached state.
+      log.info('session', 'cold-start:headless-with-cached-state');
+      await this._launchBrowser({ headed: false });
 
+      await log.span('browser', 'goto', async () => {
+        await this._page.goto(TEAMS_URL, { waitUntil: 'domcontentloaded' });
+      }, { url: TEAMS_URL });
+
+      const authed = await this._waitForAuthOrLoginPage(INITIAL_DECIDE_MS);
+      if (authed) {
+        log.info('session', 'initial-state:already-authed');
+        await this._persistStorageState();
+        return this._page;
+      }
+      log.warn('session', 'cached-state-stale; switching to headed sign-in');
+      // Fall through to interactive sign-in.
+    } else {
+      log.info('session', 'cold-start:no-cached-state; headed sign-in needed');
+    }
+
+    await this._doInteractiveSignIn();
+    return this._page;
+  }
+
+  /**
+   * Tear down whatever session we have, launch a *headed* Chrome so the
+   * user can sign in, run the interactive sign-in loop, persist the
+   * resulting storage state, and then relaunch headless so subsequent
+   * tool calls don't show a window.
+   */
+  async _doInteractiveSignIn() {
+    await this._disposeSession();
+
+    log.info('session', 'launch:headed');
+    await this._launchBrowser({ headed: true });
     await log.span('browser', 'goto', async () => {
       await this._page.goto(TEAMS_URL, { waitUntil: 'domcontentloaded' });
     }, { url: TEAMS_URL });
 
-    // Decide: are we already signed in, or do we need interactive sign-in?
+    await this._runSignInLoop();
+    await this._persistStorageState();
+
+    log.info('session', 'relaunch:headless-after-auth');
+    await this._disposeSession();
+    await this._launchBrowser({ headed: false });
+    await log.span('browser', 'goto', async () => {
+      await this._page.goto(TEAMS_URL, { waitUntil: 'domcontentloaded' });
+    }, { url: TEAMS_URL });
+
     const authed = await this._waitForAuthOrLoginPage(INITIAL_DECIDE_MS);
     if (!authed) {
-      log.info('session', 'initial-state:needs-sign-in');
-      await this._runSignInLoop();
-    } else {
-      log.info('session', 'initial-state:already-authed');
+      log.error('session', 'headless-replay-failed', null, {});
+      throw new Error(
+        'Sign-in completed but the headless replay of the saved storage ' +
+        'state did not land on an authenticated Teams session. Try calling ' +
+        '`authenticate` again.',
+      );
     }
-
     await this._persistStorageState();
-    return this._page;
   }
 
-  async _launchBrowser() {
+  async _launchBrowser({ headed = false } = {}) {
     // Clear any stale abort sentinel so we don't immediately bail on
     // the first sign-in loop.
     try {
       if (fs.existsSync(ABORT_FILE)) fs.unlinkSync(ABORT_FILE);
     } catch { /* ignore */ }
 
-    await log.span('browser', 'launch', async () => {
+    await log.span('browser', headed ? 'launch:headed' : 'launch:headless', async () => {
       this._browser = await chromium.launch({
         channel: 'chrome',
-        headless: false,
+        headless: !headed,
       });
+      this._headed = headed;
     });
 
     await log.span('browser', 'newContext', async () => {
@@ -240,20 +298,32 @@ class TeamsSession {
 
   /**
    * Quick yes/no authed check. Used on every getPage() call and inside
-   * the sign-in poll loop. Budgets ~totalBudgetMs across all selectors.
+   * the sign-in poll loop. Races all logged-in selectors against the
+   * full budget so the selector that actually becomes visible first
+   * wins — dividing the budget across selectors leads to false
+   * negatives when Teams' DOM happens to be a few hundred ms slower
+   * than expected.
    */
   async _isAuthed(totalBudgetMs) {
     return log.span('session', 'isAuthed', async () => {
-      if (!this._page || this._page.isClosed()) return false;
-      const perSelector = Math.max(100, Math.floor(totalBudgetMs / LOGGED_IN_SELECTORS.length));
-      for (const sel of LOGGED_IN_SELECTORS) {
-        try {
-          await this._page.waitForSelector(sel, { state: 'visible', timeout: perSelector });
-          return true;
-        } catch { /* try next */ }
+      if (!this._page || this._page.isClosed()) {
+        log.info('session', 'isAuthed:result', { authed: false, reason: 'no-page', headed: this._headed });
+        return false;
       }
-      return false;
-    }, { budgetMs: totalBudgetMs });
+      let authed = false;
+      try {
+        await Promise.any(
+          LOGGED_IN_SELECTORS.map((sel) =>
+            this._page.waitForSelector(sel, { state: 'visible', timeout: totalBudgetMs }),
+          ),
+        );
+        authed = true;
+      } catch {
+        authed = false;
+      }
+      log.info('session', 'isAuthed:result', { authed, headed: this._headed, budgetMs: totalBudgetMs });
+      return authed;
+    }, { budgetMs: totalBudgetMs, headed: this._headed });
   }
 
   /**

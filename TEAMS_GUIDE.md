@@ -10,7 +10,7 @@ human would, using the primitives below.
 
 | Tool | Purpose |
 |---|---|
-| `authenticate` | Force a fresh sign-in. Call once at the start of a session, or after a tool errors with auth-related text. Blocks until the user signs in inside the Playwright Chrome window. |
+| `authenticate` | Force a fresh sign-in. Call once at the start of a session, or after a tool errors with auth-related text. Temporarily shows a Chrome window for the user to sign in, then hides it again (relaunches headless) once auth is captured. |
 | `teams_navigate` | Navigate the page to a `https://teams.microsoft.com/*` URL. |
 | `teams_query` | `document.querySelectorAll(selector)` and return tag/text/attrs/visibility for each match. **Always start here** when you don't know the DOM. |
 | `teams_click` | Real Playwright click on a CSS selector (with `nth` for disambiguation). |
@@ -92,15 +92,21 @@ often includes the author and timestamp.
 
 ## Auth and lifecycle
 
-- The browser is launched on first use. If there's no saved session,
-  `authenticate` (or any other tool) will open a Chrome window and
-  block while you sign in.
+- Normal operation runs Chrome **headless** — no visible window. The
+  saved storage state from `%LOCALAPPDATA%\TeamsBrowserMcp\state.json`
+  is replayed on launch and tools run silently in the background.
+- A Chrome window only appears when interactive sign-in is actually
+  needed: first run with no cached state, expired session, or after
+  calling `authenticate`. As soon as sign-in completes the headed
+  window is closed and the browser is relaunched headless for the
+  rest of the session.
 - A network-level allowlist restricts the browser to Microsoft-owned
   hosts — no general web browsing.
 - The session is reused across all tool calls. Storage state is
   persisted between MCP server restarts.
 - If a tool starts failing because the session expired, call
-  `authenticate` to force a fresh login.
+  `authenticate` to force a fresh login. A Chrome window will pop up
+  briefly for re-login and then disappear again.
 
 ## Don'ts
 
