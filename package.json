@@ -1,0 +1,21 @@
+{
+  "name": "teams-browser-mcp",
+  "version": "0.2.0",
+  "description": "Node.js MCP server that drives Microsoft Teams via a user-authenticated Playwright Chrome session.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "teams-browser-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "postinstall": "node -e \"console.log('Run: npx playwright install chrome')\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "playwright": "^1.47.0"
+  }
+}

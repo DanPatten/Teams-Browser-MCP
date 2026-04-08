@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Playwright MCP scratch (DOM snapshots from debugging sessions —
+# may contain personal Teams content, never commit)
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# Local auth state — also lives in %LOCALAPPDATA%\TeamsBrowserMcp\
+# but ignore here defensively in case anyone copies it in
+state.json
+abort-auth
