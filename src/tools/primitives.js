@@ -14,6 +14,20 @@ import { log } from '../logger.js';
 
 const TEAMS_HOST_RE = /(^|\.)teams\.microsoft\.com$/i;
 
+// MCP servers don't always enforce inputSchema before the handler runs,
+// so callers can land here with required string args missing or of the
+// wrong type. Without this guard a missing `selector` gets coerced to
+// the literal string "undefined" by document.querySelectorAll and
+// silently returns 0 matches — turning a misuse into a fake-success.
+function requireString(toolName, fieldName, value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(
+      `${toolName}: '${fieldName}' is required and must be a non-empty string ` +
+      `(got ${value === undefined ? 'undefined' : JSON.stringify(value)})`,
+    );
+  }
+}
+
 function assertTeamsUrl(url) {
   let u;
   try {
@@ -104,6 +118,7 @@ export const teamsNavigateTool = {
   },
   async handler({ url, waitUntil = 'domcontentloaded' }) {
     return log.span('tool.teams_navigate', 'tool', async () => {
+      requireString('teams_navigate', 'url', url);
       const target = assertTeamsUrl(url);
       const page = await session.getPage();
       await page.goto(target, { waitUntil });
@@ -122,10 +137,13 @@ export const teamsNavigateTool = {
 export const teamsQueryTool = {
   name: 'teams_query',
   description:
-    'Run document.querySelectorAll(selector) on the Teams page and return ' +
-    'a trimmed serialization (tag, text, attributes, visibility) of each ' +
-    'match. Use this to explore the DOM before clicking/typing. Default ' +
-    'limit is 20 matches.',
+    'DOM query — NOT a content/message search. Runs ' +
+    'document.querySelectorAll(selector) on the Teams page and returns a ' +
+    'trimmed serialization (tag, text, attributes, visibility) of each ' +
+    'match. Takes a CSS `selector` (e.g. "[data-tid=\'chat-pane-message\']"), ' +
+    'NOT a free-text query string. To search Teams content, use ' +
+    'teams_type to type into the search box and then teams_query to read ' +
+    'the result list. Default limit is 20 matches.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -137,6 +155,7 @@ export const teamsQueryTool = {
   },
   async handler({ selector, limit = 20 }) {
     return log.span('tool.teams_query', 'tool', async () => {
+      requireString('teams_query', 'selector', selector);
       const page = await session.getPage();
       const result = await page.evaluate(queryInPage, { selector, limit });
       log.info('tool.teams_query', 'result', {
@@ -169,6 +188,7 @@ export const teamsClickTool = {
   },
   async handler({ selector, nth = 0, timeoutMs = 5000 }) {
     return log.span('tool.teams_click', 'tool', async () => {
+      requireString('teams_click', 'selector', selector);
       const page = await session.getPage();
       const locator = page.locator(selector).nth(nth);
       await locator.waitFor({ state: 'visible', timeout: timeoutMs });
@@ -204,6 +224,8 @@ export const teamsTypeTool = {
   },
   async handler({ selector, text, submit = false, clear = true }) {
     return log.span('tool.teams_type', 'tool', async () => {
+      requireString('teams_type', 'selector', selector);
+      requireString('teams_type', 'text', text);
       const page = await session.getPage();
       const locator = page.locator(selector).first();
       await locator.waitFor({ state: 'visible', timeout: 5000 });
@@ -253,6 +275,7 @@ export const teamsPressKeyTool = {
   },
   async handler({ key }) {
     return log.span('tool.teams_press_key', 'tool', async () => {
+      requireString('teams_press_key', 'key', key);
       const page = await session.getPage();
       await page.keyboard.press(key);
       return {
@@ -284,6 +307,7 @@ export const teamsWaitForTool = {
   },
   async handler({ selector, state = 'visible', timeoutMs = 10_000 }) {
     return log.span('tool.teams_wait_for', 'tool', async () => {
+      requireString('teams_wait_for', 'selector', selector);
       const page = await session.getPage();
       await page.waitForSelector(selector, { state, timeout: timeoutMs });
       return {
@@ -311,6 +335,7 @@ export const teamsEvaluateTool = {
   },
   async handler({ expression }) {
     return log.span('tool.teams_evaluate', 'tool', async () => {
+      requireString('teams_evaluate', 'expression', expression);
       const page = await session.getPage();
       const wrapped = `(() => (${expression}))()`;
       const result = await page.evaluate(wrapped);

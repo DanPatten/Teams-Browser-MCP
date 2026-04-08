@@ -32,18 +32,30 @@ const LOGIN_FORM_SELECTORS = [
 const QUICK_AUTH_CHECK_MS = 3000;
 
 // One-time warm-up after a fresh page is established. The auth markers
-// (LOGGED_IN_SELECTORS) appear early in Teams' boot — before the search
-// box, chat list, etc. are usable. We wait for one of these "actually
-// ready" markers before handing the page to the first tool, then never
-// wait again for the lifetime of the session.
-const UI_READY_SELECTORS = [
-  "[data-tid='AUTOSUGGEST_INPUT']", // Global search box in the persistent header.
-];
+// (LOGGED_IN_SELECTORS) appear early in Teams' boot — before the UI is
+// actually interactive. Two things must be true before we hand the
+// page to the first tool:
+//   1. The global search box has rendered (proves the app shell DOM
+//      has been laid out).
+//   2. The "pre-core-title-bar" splash overlay is gone. This element
+//      sits on top of the entire UI for the first few seconds and
+//      intercepts pointer events, so any click before it disappears
+//      fails with "<pre-core-title-bar> intercepts pointer events"
+//      even though the target element is visible.
+const UI_READY_VISIBLE_SELECTOR = "[data-tid='AUTOSUGGEST_INPUT']";
+const UI_READY_HIDDEN_SELECTOR = "[data-tid='pre-core-title-bar']";
 const UI_READY_TIMEOUT_MS = 15_000;
 
 // Budget for the initial "logged in vs login page" decision after the
-// very first navigate.
-const INITIAL_DECIDE_MS = 20_000;
+// very first navigate. Has to be generous because Teams in headless
+// mode can take 20+ seconds to render the LOGGED_IN_SELECTORS even
+// when the cached storage state is perfectly valid — and a false
+// timeout here gets interpreted as "cached state is stale" and
+// triggers a spurious headed re-sign-in for an already-authenticated
+// user. The asymmetry favors waiting longer: an unnecessary wait on
+// a truly expired session is annoying; a spurious sign-in is
+// destructive.
+const INITIAL_DECIDE_MS = 60_000;
 
 // Interactive sign-in poll loop.
 const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -120,6 +132,7 @@ class TeamsSession {
     this._context = null;
     this._page = null;
     this._headed = false;
+    this._warmedUp = false;
     this._lock = Promise.resolve();
   }
 
@@ -152,6 +165,7 @@ class TeamsSession {
     this._page = null;
     this._browser = null;
     this._headed = false;
+    this._warmedUp = false;
   }
 
   async _ensureSession() {
@@ -161,6 +175,7 @@ class TeamsSession {
       if (authed) {
         log.info('session', 'reuse-existing-page', { authed: true, headed: this._headed });
         await this._persistStorageState();
+        await this._ensureWarmedUp();
         return this._page;
       }
       log.warn('session', 'existing-page-not-authed; switching to headed sign-in', { headed: this._headed });
@@ -182,6 +197,7 @@ class TeamsSession {
       if (authed) {
         log.info('session', 'initial-state:already-authed');
         await this._persistStorageState();
+        await this._ensureWarmedUp();
         return this._page;
       }
       log.warn('session', 'cached-state-stale; switching to headed sign-in');
@@ -229,6 +245,59 @@ class TeamsSession {
       );
     }
     await this._persistStorageState();
+    await this._ensureWarmedUp();
+  }
+
+  /**
+   * One-time wait for Teams' UI to actually be usable (not just the
+   * auth shell). Idempotent — sets `_warmedUp` so subsequent
+   * `getPage()` calls short-circuit. Best-effort: on timeout we still
+   * proceed, letting the calling tool's own waitFor surface a real
+   * error if Teams is genuinely broken.
+   */
+  async _ensureWarmedUp() {
+    if (this._warmedUp) return;
+    if (!this._page || this._page.isClosed()) return;
+    await log.span('session', 'ui-ready', async () => {
+      const deadline = Date.now() + UI_READY_TIMEOUT_MS;
+      // 1. Wait for the search box to be in the DOM and visible.
+      try {
+        await this._page.waitForSelector(UI_READY_VISIBLE_SELECTOR, {
+          state: 'visible',
+          timeout: UI_READY_TIMEOUT_MS,
+        });
+        log.info('session', 'ui-ready:visible-hit', {
+          selector: UI_READY_VISIBLE_SELECTOR,
+          headed: this._headed,
+        });
+      } catch {
+        log.warn('session', 'ui-ready:visible-timeout', {
+          selector: UI_READY_VISIBLE_SELECTOR,
+          headed: this._headed,
+        });
+      }
+      // 2. Wait for the splash overlay to be gone (state: 'hidden'
+      //    matches "not in DOM" too, so this is instant when the
+      //    splash never appeared in the first place).
+      const remaining = Math.max(500, deadline - Date.now());
+      try {
+        await this._page.waitForSelector(UI_READY_HIDDEN_SELECTOR, {
+          state: 'hidden',
+          timeout: remaining,
+        });
+        log.info('session', 'ui-ready:hidden-hit', {
+          selector: UI_READY_HIDDEN_SELECTOR,
+          headed: this._headed,
+        });
+      } catch {
+        log.warn('session', 'ui-ready:hidden-timeout', {
+          selector: UI_READY_HIDDEN_SELECTOR,
+          headed: this._headed,
+        });
+      }
+      // Always mark warmed-up so we don't re-pay this on every call.
+      this._warmedUp = true;
+    }, { timeoutMs: UI_READY_TIMEOUT_MS, headed: this._headed });
   }
 
   async _launchBrowser({ headed = false } = {}) {
